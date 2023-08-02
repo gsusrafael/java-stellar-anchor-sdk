@@ -103,7 +103,7 @@ public abstract class ActionHandler<T extends RpcActionParamsRequest> {
             .transaction(txResponse)
             .build());
 
-    return toGetTransactionResponse(txn, assetService);
+    return txResponse;
   }
 
   public abstract ActionMethod getActionType();

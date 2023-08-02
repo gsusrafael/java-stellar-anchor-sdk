@@ -17,6 +17,7 @@ import org.stellar.anchor.api.event.AnchorEvent
 import org.stellar.anchor.platform.CLIENT_WALLET_SECRET
 import org.stellar.anchor.platform.TestConfig
 import org.stellar.anchor.util.GsonUtils
+import org.stellar.anchor.util.Log
 import org.stellar.anchor.util.Log.info
 import org.stellar.anchor.util.StringHelper.json
 import org.stellar.reference.client.AnchorReferenceServerClient
@@ -194,6 +195,10 @@ class Sep24End2EndTest(config: TestConfig, val jwt: String) {
       val events = anchorReferenceServerClient.getEvents(txnId)
       if (events.size == count) {
         return events
+      } else {
+        Log.infoF("!!! Request sent to: {}", anchorReferenceServerClient.endpoint)
+        Log.infoF("!!! Received events: {}", events.size)
+        events.forEach { info(it.toString()) }
       }
       delay(1.seconds)
       retries--
