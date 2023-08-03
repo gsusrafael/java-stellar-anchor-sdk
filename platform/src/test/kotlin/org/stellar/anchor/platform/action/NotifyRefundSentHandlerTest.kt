@@ -1,5 +1,7 @@
 package org.stellar.anchor.platform.action
 
+import io.micrometer.core.instrument.Counter
+import io.micrometer.core.instrument.Metrics
 import io.mockk.*
 import io.mockk.impl.annotations.MockK
 import java.time.Instant
@@ -8,8 +10,10 @@ import kotlin.test.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
+import org.skyscreamer.jsonassert.Customization
 import org.skyscreamer.jsonassert.JSONAssert
 import org.skyscreamer.jsonassert.JSONCompareMode
+import org.skyscreamer.jsonassert.comparator.CustomComparator
 import org.stellar.anchor.api.event.AnchorEvent
 import org.stellar.anchor.api.event.AnchorEvent.Type.TRANSACTION_STATUS_CHANGED
 import org.stellar.anchor.api.exception.BadRequestException
@@ -17,14 +21,19 @@ import org.stellar.anchor.api.exception.rpc.InvalidParamsException
 import org.stellar.anchor.api.exception.rpc.InvalidRequestException
 import org.stellar.anchor.api.platform.GetTransactionResponse
 import org.stellar.anchor.api.platform.PlatformTransactionData.Kind.DEPOSIT
+import org.stellar.anchor.api.platform.PlatformTransactionData.Kind.RECEIVE
 import org.stellar.anchor.api.platform.PlatformTransactionData.Kind.WITHDRAWAL
 import org.stellar.anchor.api.platform.PlatformTransactionData.Sep.SEP_24
+import org.stellar.anchor.api.platform.PlatformTransactionData.Sep.SEP_31
+import org.stellar.anchor.api.platform.PlatformTransactionData.Sep.SEP_38
 import org.stellar.anchor.api.rpc.action.AmountAssetRequest
 import org.stellar.anchor.api.rpc.action.NotifyRefundSentRequest
 import org.stellar.anchor.api.sep.SepTransactionStatus.*
 import org.stellar.anchor.api.shared.Amount
+import org.stellar.anchor.api.shared.Customers
 import org.stellar.anchor.api.shared.RefundPayment
 import org.stellar.anchor.api.shared.Refunds
+import org.stellar.anchor.api.shared.StellarId
 import org.stellar.anchor.asset.AssetService
 import org.stellar.anchor.asset.DefaultAssetService
 import org.stellar.anchor.event.EventService
@@ -33,6 +42,9 @@ import org.stellar.anchor.event.EventService.Session
 import org.stellar.anchor.platform.data.JdbcSep24RefundPayment
 import org.stellar.anchor.platform.data.JdbcSep24Refunds
 import org.stellar.anchor.platform.data.JdbcSep24Transaction
+import org.stellar.anchor.platform.data.JdbcSep31RefundPayment
+import org.stellar.anchor.platform.data.JdbcSep31Refunds
+import org.stellar.anchor.platform.data.JdbcSep31Transaction
 import org.stellar.anchor.platform.validator.RequestValidator
 import org.stellar.anchor.sep24.Sep24TransactionStore
 import org.stellar.anchor.sep31.Sep31TransactionStore
@@ -46,6 +58,7 @@ class NotifyRefundSentHandlerTest {
     private const val STELLAR_USDC =
       "stellar:USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
     private const val FIAT_USD_CODE = "USD"
+    private const val VALIDATION_ERROR_MESSAGE = "Invalid request"
   }
 
   @MockK(relaxed = true) private lateinit var txn24Store: Sep24TransactionStore
@@ -59,6 +72,8 @@ class NotifyRefundSentHandlerTest {
   @MockK(relaxed = true) private lateinit var eventService: EventService
 
   @MockK(relaxed = true) private lateinit var eventSession: Session
+
+  @MockK(relaxed = true) private lateinit var sepTransactionCounter: Counter
 
   private lateinit var handler: NotifyRefundSentHandler
 
@@ -81,11 +96,11 @@ class NotifyRefundSentHandlerTest {
 
     every { txn24Store.findByTransactionId(TX_ID) } returns spyTxn24
     every { txn31Store.findByTransactionId(any()) } returns null
-    every { spyTxn24.protocol } returns "38"
+    every { spyTxn24.protocol } returns SEP_38.sep.toString()
 
     val ex = assertThrows<InvalidRequestException> { handler.handle(request) }
     assertEquals(
-      "Action[notify_refund_sent] is not supported for status[pending_anchor], kind[null] and protocol[38]",
+      "Action[notify_refund_sent] is not supported. Status[pending_anchor], kind[null], protocol[38], funds received[false]",
       ex.message
     )
   }
@@ -103,7 +118,7 @@ class NotifyRefundSentHandlerTest {
 
     var ex = assertThrows<InvalidRequestException> { handler.handle(request) }
     assertEquals(
-      "Action[notify_refund_sent] is not supported for status[incomplete], kind[deposit] and protocol[24]",
+      "Action[notify_refund_sent] is not supported. Status[incomplete], kind[deposit], protocol[24], funds received[true]",
       ex.message
     )
 
@@ -111,13 +126,13 @@ class NotifyRefundSentHandlerTest {
 
     ex = assertThrows { handler.handle(request) }
     assertEquals(
-      "Action[notify_refund_sent] is not supported for status[incomplete], kind[withdrawal] and protocol[24]",
+      "Action[notify_refund_sent] is not supported. Status[incomplete], kind[withdrawal], protocol[24], funds received[true]",
       ex.message
     )
   }
 
   @Test
-  fun test_handle_invalidRequest_missing_refunds() {
+  fun test_handle_sep24_invalidRequest_missing_refunds() {
     val request = NotifyRefundSentRequest.builder().transactionId(TX_ID).build()
     val txn24 = JdbcSep24Transaction()
     txn24.status = PENDING_ANCHOR.toString()
@@ -141,10 +156,11 @@ class NotifyRefundSentHandlerTest {
 
     every { txn24Store.findByTransactionId(TX_ID) } returns txn24
     every { txn31Store.findByTransactionId(any()) } returns null
-    every { requestValidator.validate(request) } throws InvalidParamsException("Invalid request")
+    every { requestValidator.validate(request) } throws
+      InvalidParamsException(VALIDATION_ERROR_MESSAGE)
 
     val ex = assertThrows<InvalidParamsException> { handler.handle(request) }
-    assertEquals("Invalid request", ex.message?.trimIndent())
+    assertEquals(VALIDATION_ERROR_MESSAGE, ex.message?.trimIndent())
   }
 
   @Test
@@ -222,7 +238,7 @@ class NotifyRefundSentHandlerTest {
   }
 
   @Test
-  fun test_handle_ok_partial_refund() {
+  fun test_handle_ok_sep24_sep24_partial_refund() {
     val transferReceivedAt = Instant.now()
     val request =
       NotifyRefundSentRequest.builder()
@@ -253,16 +269,21 @@ class NotifyRefundSentHandlerTest {
     payment.amount = request.refund.amount.amount
     payment.fee = request.refund.amountFee.amount
 
+    mockkStatic(Metrics::class)
+
     every { txn24Store.findByTransactionId(TX_ID) } returns txn24
     every { txn31Store.findByTransactionId(any()) } returns null
     every { txn24Store.save(capture(sep24TxnCapture)) } returns null
     every { eventSession.publish(capture(anchorEventCapture)) } just Runs
+    every { Metrics.counter("sep24.transaction", "status", "pending_anchor") } returns
+      sepTransactionCounter
 
     val startDate = Instant.now()
     val response = handler.handle(request)
     val endDate = Instant.now()
 
     verify(exactly = 0) { txn31Store.save(any()) }
+    verify(exactly = 1) { sepTransactionCounter.increment() }
 
     val expectedSep24Txn = JdbcSep24Transaction()
     expectedSep24Txn.kind = DEPOSIT.kind
@@ -323,12 +344,12 @@ class NotifyRefundSentHandlerTest {
       JSONCompareMode.STRICT
     )
 
-    assertTrue(expectedSep24Txn.updatedAt >= startDate)
-    assertTrue(expectedSep24Txn.updatedAt <= endDate)
+    assertTrue(sep24TxnCapture.captured.updatedAt >= startDate)
+    assertTrue(sep24TxnCapture.captured.updatedAt <= endDate)
   }
 
   @Test
-  fun test_handle_ok_full_refund() {
+  fun test_handle_ok_sep24_full_refund() {
     val transferReceivedAt = Instant.now()
     val request =
       NotifyRefundSentRequest.builder()
@@ -367,16 +388,21 @@ class NotifyRefundSentHandlerTest {
     refunds.payments = listOf(payment1)
     txn24.refunds = refunds
 
+    mockkStatic(Metrics::class)
+
     every { txn24Store.findByTransactionId(TX_ID) } returns txn24
     every { txn31Store.findByTransactionId(any()) } returns null
     every { txn24Store.save(capture(sep24TxnCapture)) } returns null
     every { eventSession.publish(capture(anchorEventCapture)) } just Runs
+    every { Metrics.counter("sep24.transaction", "status", "refunded") } returns
+      sepTransactionCounter
 
     val startDate = Instant.now()
     val response = handler.handle(request)
     val endDate = Instant.now()
 
     verify(exactly = 0) { txn31Store.save(any()) }
+    verify(exactly = 1) { sepTransactionCounter.increment() }
 
     val expectedSep24Txn = JdbcSep24Transaction()
     expectedSep24Txn.kind = DEPOSIT.kind
@@ -398,7 +424,7 @@ class NotifyRefundSentHandlerTest {
     JSONAssert.assertEquals(
       gson.toJson(expectedSep24Txn),
       gson.toJson(sep24TxnCapture.captured),
-      JSONCompareMode.STRICT
+      CustomComparator(JSONCompareMode.STRICT, Customization("completed_at") { _, _ -> true })
     )
 
     val expectedResponse = GetTransactionResponse()
@@ -428,7 +454,7 @@ class NotifyRefundSentHandlerTest {
     JSONAssert.assertEquals(
       gson.toJson(expectedResponse),
       gson.toJson(response),
-      JSONCompareMode.STRICT
+      CustomComparator(JSONCompareMode.STRICT, Customization("completed_at") { _, _ -> true })
     )
 
     val expectedEvent =
@@ -445,14 +471,14 @@ class NotifyRefundSentHandlerTest {
       JSONCompareMode.STRICT
     )
 
-    assertTrue(expectedSep24Txn.updatedAt >= startDate)
-    assertTrue(expectedSep24Txn.updatedAt <= endDate)
-    assertTrue(expectedSep24Txn.completedAt >= startDate)
-    assertTrue(expectedSep24Txn.completedAt <= endDate)
+    assertTrue(sep24TxnCapture.captured.updatedAt >= startDate)
+    assertTrue(sep24TxnCapture.captured.updatedAt <= endDate)
+    assertTrue(sep24TxnCapture.captured.completedAt >= startDate)
+    assertTrue(sep24TxnCapture.captured.completedAt <= endDate)
   }
 
   @Test
-  fun `test_handle_ok full_refund_in_single_call`() {
+  fun test_handle_ok_sep24_full_refund_in_single_call() {
     val transferReceivedAt = Instant.now()
     val request =
       NotifyRefundSentRequest.builder()
@@ -482,16 +508,21 @@ class NotifyRefundSentHandlerTest {
     payment.amount = "1"
     payment.fee = "0"
 
+    mockkStatic(Metrics::class)
+
     every { txn24Store.findByTransactionId(TX_ID) } returns txn24
     every { txn31Store.findByTransactionId(any()) } returns null
     every { txn24Store.save(capture(sep24TxnCapture)) } returns null
     every { eventSession.publish(capture(anchorEventCapture)) } just Runs
+    every { Metrics.counter("sep24.transaction", "status", "refunded") } returns
+      sepTransactionCounter
 
     val startDate = Instant.now()
     val response = handler.handle(request)
     val endDate = Instant.now()
 
     verify(exactly = 0) { txn31Store.save(any()) }
+    verify(exactly = 1) { sepTransactionCounter.increment() }
 
     val expectedSep24Txn = JdbcSep24Transaction()
     expectedSep24Txn.kind = DEPOSIT.kind
@@ -513,7 +544,7 @@ class NotifyRefundSentHandlerTest {
     JSONAssert.assertEquals(
       gson.toJson(expectedSep24Txn),
       gson.toJson(sep24TxnCapture.captured),
-      JSONCompareMode.STRICT
+      CustomComparator(JSONCompareMode.STRICT, Customization("completed_at") { _, _ -> true })
     )
 
     val expectedResponse = GetTransactionResponse()
@@ -537,7 +568,7 @@ class NotifyRefundSentHandlerTest {
     JSONAssert.assertEquals(
       gson.toJson(expectedResponse),
       gson.toJson(response),
-      JSONCompareMode.STRICT
+      CustomComparator(JSONCompareMode.STRICT, Customization("completed_at") { _, _ -> true })
     )
 
     val expectedEvent =
@@ -554,14 +585,14 @@ class NotifyRefundSentHandlerTest {
       JSONCompareMode.STRICT
     )
 
-    assertTrue(expectedSep24Txn.updatedAt >= startDate)
-    assertTrue(expectedSep24Txn.updatedAt <= endDate)
-    assertTrue(expectedSep24Txn.completedAt >= startDate)
-    assertTrue(expectedSep24Txn.completedAt <= endDate)
+    assertTrue(sep24TxnCapture.captured.updatedAt >= startDate)
+    assertTrue(sep24TxnCapture.captured.updatedAt <= endDate)
+    assertTrue(sep24TxnCapture.captured.completedAt >= startDate)
+    assertTrue(sep24TxnCapture.captured.completedAt <= endDate)
   }
 
   @Test
-  fun `test handle sent more then amount_in`() {
+  fun test_handle_sent_more_then_amount_in() {
     val request =
       NotifyRefundSentRequest.builder()
         .transactionId(TX_ID)
@@ -598,7 +629,7 @@ class NotifyRefundSentHandlerTest {
   }
 
   @Test
-  fun test_handle_ok_pending_external_empty_refund() {
+  fun test_handle_ok_sep24_pending_external_empty_refund() {
     val transferReceivedAt = Instant.now()
     val request = NotifyRefundSentRequest.builder().transactionId(TX_ID).build()
     val txn24 = JdbcSep24Transaction()
@@ -623,16 +654,21 @@ class NotifyRefundSentHandlerTest {
     refunds.payments = listOf(payment)
     txn24.refunds = refunds
 
+    mockkStatic(Metrics::class)
+
     every { txn24Store.findByTransactionId(TX_ID) } returns txn24
     every { txn31Store.findByTransactionId(any()) } returns null
     every { txn24Store.save(capture(sep24TxnCapture)) } returns null
     every { eventSession.publish(capture(anchorEventCapture)) } just Runs
+    every { Metrics.counter("sep24.transaction", "status", "pending_anchor") } returns
+      sepTransactionCounter
 
     val startDate = Instant.now()
     val response = handler.handle(request)
     val endDate = Instant.now()
 
     verify(exactly = 0) { txn31Store.save(any()) }
+    verify(exactly = 1) { sepTransactionCounter.increment() }
 
     val expectedSep24Txn = JdbcSep24Transaction()
     expectedSep24Txn.kind = DEPOSIT.kind
@@ -693,12 +729,12 @@ class NotifyRefundSentHandlerTest {
       JSONCompareMode.STRICT
     )
 
-    assertTrue(expectedSep24Txn.updatedAt >= startDate)
-    assertTrue(expectedSep24Txn.updatedAt <= endDate)
+    assertTrue(sep24TxnCapture.captured.updatedAt >= startDate)
+    assertTrue(sep24TxnCapture.captured.updatedAt <= endDate)
   }
 
   @Test
-  fun test_handle_ok_pending_external_override_amount() {
+  fun test_handle_ok_sep24_pending_external_override_amount() {
     val transferReceivedAt = Instant.now()
     val request =
       NotifyRefundSentRequest.builder()
@@ -737,16 +773,21 @@ class NotifyRefundSentHandlerTest {
     refunds.payments = listOf(payment1, payment2)
     txn24.refunds = refunds
 
+    mockkStatic(Metrics::class)
+
     every { txn24Store.findByTransactionId(TX_ID) } returns txn24
     every { txn31Store.findByTransactionId(any()) } returns null
     every { txn24Store.save(capture(sep24TxnCapture)) } returns null
     every { eventSession.publish(capture(anchorEventCapture)) } just Runs
+    every { Metrics.counter("sep24.transaction", "status", "pending_anchor") } returns
+      sepTransactionCounter
 
     val startDate = Instant.now()
     val response = handler.handle(request)
     val endDate = Instant.now()
 
     verify(exactly = 0) { txn31Store.save(any()) }
+    verify(exactly = 1) { sepTransactionCounter.increment() }
 
     val expectedSep24Txn = JdbcSep24Transaction()
     expectedSep24Txn.kind = DEPOSIT.kind
@@ -821,12 +862,12 @@ class NotifyRefundSentHandlerTest {
       JSONCompareMode.STRICT
     )
 
-    assertTrue(expectedSep24Txn.updatedAt >= startDate)
-    assertTrue(expectedSep24Txn.updatedAt <= endDate)
+    assertTrue(sep24TxnCapture.captured.updatedAt >= startDate)
+    assertTrue(sep24TxnCapture.captured.updatedAt <= endDate)
   }
 
   @Test
-  fun test_handle_ok_pending_external_invalid_id() {
+  fun test_handle_ok_sep24_pending_external_invalid_id() {
     val request =
       NotifyRefundSentRequest.builder()
         .transactionId(TX_ID)
@@ -862,6 +903,453 @@ class NotifyRefundSentHandlerTest {
     every { txn24Store.findByTransactionId(TX_ID) } returns txn24
     every { txn31Store.findByTransactionId(any()) } returns null
     every { txn24Store.save(capture(sep24TxnCapture)) } returns null
+
+    val ex = assertThrows<InvalidParamsException> { handler.handle(request) }
+    assertEquals("Invalid refund id", ex.message)
+  }
+
+  @Test
+  fun `test handle sep31 ok full refund in single call`() {
+    val transferReceivedAt = Instant.now()
+    val request =
+      NotifyRefundSentRequest.builder()
+        .transactionId(TX_ID)
+        .refund(
+          NotifyRefundSentRequest.Refund.builder()
+            .amount(AmountAssetRequest("1", STELLAR_USDC))
+            .amountFee(AmountAssetRequest("0", STELLAR_USDC))
+            .id("1")
+            .build()
+        )
+        .build()
+    val txn31 = JdbcSep31Transaction()
+    txn31.status = PENDING_RECEIVER.toString()
+    txn31.transferReceivedAt = transferReceivedAt
+    txn31.amountInAsset = STELLAR_USDC
+    txn31.amountIn = "1"
+    txn31.amountOutAsset = FIAT_USD
+    txn31.amountOut = "1"
+    txn31.amountFeeAsset = STELLAR_USDC
+    txn31.amountFee = "0"
+
+    val payment = JdbcSep31RefundPayment()
+    payment.id = "1"
+    payment.amount = "1"
+    payment.fee = "0"
+
+    val sep31TxnCapture = slot<JdbcSep31Transaction>()
+    val anchorEventCapture = slot<AnchorEvent>()
+
+    every { txn24Store.findByTransactionId(TX_ID) } returns null
+    every { txn31Store.findByTransactionId(any()) } returns txn31
+    every { txn31Store.save(capture(sep31TxnCapture)) } returns null
+    every { eventSession.publish(capture(anchorEventCapture)) } just Runs
+
+    val startDate = Instant.now()
+    val response = handler.handle(request)
+    val endDate = Instant.now()
+
+    verify(exactly = 0) { txn24Store.save(any()) }
+
+    val expectedSep31Txn = JdbcSep31Transaction()
+    expectedSep31Txn.status = REFUNDED.toString()
+    expectedSep31Txn.updatedAt = sep31TxnCapture.captured.updatedAt
+    expectedSep31Txn.amountInAsset = STELLAR_USDC
+    expectedSep31Txn.amountIn = "1"
+    expectedSep31Txn.amountOutAsset = FIAT_USD
+    expectedSep31Txn.amountOut = "1"
+    expectedSep31Txn.amountFeeAsset = STELLAR_USDC
+    expectedSep31Txn.amountFee = "0"
+    expectedSep31Txn.transferReceivedAt = transferReceivedAt
+    expectedSep31Txn.completedAt = sep31TxnCapture.captured.completedAt
+
+    val expectedRefunds = JdbcSep31Refunds()
+    expectedRefunds.amountRefunded = "1"
+    expectedRefunds.amountFee = "0"
+    expectedRefunds.payments = listOf(payment)
+    expectedSep31Txn.refunds = expectedRefunds
+
+    JSONAssert.assertEquals(
+      gson.toJson(expectedSep31Txn),
+      gson.toJson(sep31TxnCapture.captured),
+      JSONCompareMode.STRICT
+    )
+
+    val expectedResponse = GetTransactionResponse()
+    expectedResponse.sep = SEP_31
+    expectedResponse.kind = RECEIVE
+    expectedResponse.status = REFUNDED
+    expectedResponse.amountExpected = Amount(null, STELLAR_USDC)
+    expectedResponse.amountIn = Amount("1", STELLAR_USDC)
+    expectedResponse.amountOut = Amount("1", FIAT_USD)
+    expectedResponse.amountFee = Amount("0", STELLAR_USDC)
+    expectedResponse.updatedAt = sep31TxnCapture.captured.updatedAt
+    expectedResponse.transferReceivedAt = transferReceivedAt
+    expectedResponse.customers = Customers(StellarId(null, null), StellarId(null, null))
+
+    val refundPayment = RefundPayment()
+    refundPayment.amount = Amount("1", txn31.amountInAsset)
+    refundPayment.fee = Amount("0", txn31.amountInAsset)
+    refundPayment.id = "1"
+    refundPayment.idType = RefundPayment.IdType.STELLAR
+    val refunded = Amount("1", txn31.amountInAsset)
+    val refundedFee = Amount("0", txn31.amountInAsset)
+    expectedResponse.refunds = Refunds(refunded, refundedFee, arrayOf(refundPayment))
+    expectedResponse.completedAt = sep31TxnCapture.captured.completedAt
+
+    JSONAssert.assertEquals(
+      gson.toJson(expectedResponse),
+      gson.toJson(response),
+      JSONCompareMode.STRICT
+    )
+
+    val expectedEvent =
+      AnchorEvent.builder()
+        .id(anchorEventCapture.captured.id)
+        .sep(SEP_31.sep.toString())
+        .type(AnchorEvent.Type.TRANSACTION_STATUS_CHANGED)
+        .transaction(expectedResponse)
+        .build()
+
+    JSONAssert.assertEquals(
+      gson.toJson(expectedEvent),
+      gson.toJson(anchorEventCapture.captured),
+      JSONCompareMode.STRICT
+    )
+
+    assertTrue(sep31TxnCapture.captured.updatedAt >= startDate)
+    assertTrue(sep31TxnCapture.captured.updatedAt <= endDate)
+  }
+
+  @Test
+  fun test_handle_ok_sep31_pending_stellar_empty_refund() {
+    val request = NotifyRefundSentRequest.builder().transactionId(TX_ID).build()
+    val txn31 = JdbcSep31Transaction()
+    txn31.status = PENDING_STELLAR.toString()
+    txn31.amountInAsset = STELLAR_USDC
+    txn31.amountIn = "1"
+    txn31.amountOutAsset = STELLAR_USDC
+    txn31.amountOut = "1"
+    txn31.amountFeeAsset = STELLAR_USDC
+    txn31.amountFee = "0"
+
+    val payment = JdbcSep31RefundPayment()
+    payment.id = "1"
+    payment.amount = "1"
+    payment.fee = "0"
+    val refunds = JdbcSep31Refunds()
+    refunds.amountRefunded = "1"
+    refunds.amountFee = "0"
+    refunds.payments = listOf(payment)
+    txn31.refunds = refunds
+
+    val sep31TxnCapture = slot<JdbcSep31Transaction>()
+    val anchorEventCapture = slot<AnchorEvent>()
+
+    mockkStatic(Metrics::class)
+
+    every { txn24Store.findByTransactionId(TX_ID) } returns null
+    every { txn31Store.findByTransactionId(any()) } returns txn31
+    every { txn31Store.save(capture(sep31TxnCapture)) } returns null
+    every { eventSession.publish(capture(anchorEventCapture)) } just Runs
+    every { Metrics.counter("sep31.transaction", "status", "refunded") } returns
+      sepTransactionCounter
+
+    val startDate = Instant.now()
+    val response = handler.handle(request)
+    val endDate = Instant.now()
+
+    verify(exactly = 0) { txn24Store.save(any()) }
+    verify(exactly = 1) { sepTransactionCounter.increment() }
+
+    val expectedSep31Txn = JdbcSep31Transaction()
+    expectedSep31Txn.status = REFUNDED.toString()
+    expectedSep31Txn.updatedAt = sep31TxnCapture.captured.updatedAt
+    expectedSep31Txn.amountInAsset = STELLAR_USDC
+    expectedSep31Txn.amountIn = "1"
+    expectedSep31Txn.amountOutAsset = STELLAR_USDC
+    expectedSep31Txn.amountOut = "1"
+    expectedSep31Txn.amountFeeAsset = STELLAR_USDC
+    expectedSep31Txn.amountFee = "0"
+    expectedSep31Txn.completedAt = sep31TxnCapture.captured.completedAt
+
+    val expectedRefunds = JdbcSep31Refunds()
+    expectedRefunds.amountRefunded = "1"
+    expectedRefunds.amountFee = "0"
+    expectedRefunds.payments = listOf(payment)
+    expectedSep31Txn.refunds = expectedRefunds
+
+    JSONAssert.assertEquals(
+      gson.toJson(expectedSep31Txn),
+      gson.toJson(sep31TxnCapture.captured),
+      JSONCompareMode.STRICT
+    )
+
+    val expectedResponse = GetTransactionResponse()
+    expectedResponse.sep = SEP_31
+    expectedResponse.kind = RECEIVE
+    expectedResponse.status = REFUNDED
+    expectedResponse.amountExpected = Amount(null, STELLAR_USDC)
+    expectedResponse.amountIn = Amount("1", STELLAR_USDC)
+    expectedResponse.amountOut = Amount("1", STELLAR_USDC)
+    expectedResponse.amountFee = Amount("0", STELLAR_USDC)
+    expectedResponse.updatedAt = sep31TxnCapture.captured.updatedAt
+    expectedResponse.customers = Customers(StellarId(null, null), StellarId(null, null))
+
+    val refundPayment = RefundPayment()
+    refundPayment.amount = Amount("1", txn31.amountInAsset)
+    refundPayment.fee = Amount("0", txn31.amountInAsset)
+    refundPayment.id = "1"
+    refundPayment.idType = RefundPayment.IdType.STELLAR
+    val refunded = Amount("1", txn31.amountInAsset)
+    val refundedFee = Amount("0", txn31.amountInAsset)
+    expectedResponse.refunds = Refunds(refunded, refundedFee, arrayOf(refundPayment))
+    expectedResponse.completedAt = sep31TxnCapture.captured.completedAt
+
+    JSONAssert.assertEquals(
+      gson.toJson(expectedResponse),
+      gson.toJson(response),
+      JSONCompareMode.STRICT
+    )
+
+    val expectedEvent =
+      AnchorEvent.builder()
+        .id(anchorEventCapture.captured.id)
+        .sep(SEP_31.sep.toString())
+        .type(AnchorEvent.Type.TRANSACTION_STATUS_CHANGED)
+        .transaction(expectedResponse)
+        .build()
+
+    JSONAssert.assertEquals(
+      gson.toJson(expectedEvent),
+      gson.toJson(anchorEventCapture.captured),
+      JSONCompareMode.STRICT
+    )
+
+    assertTrue(sep31TxnCapture.captured.updatedAt >= startDate)
+    assertTrue(sep31TxnCapture.captured.updatedAt <= endDate)
+  }
+
+  @Test
+  fun test_handle_ok_sep31_pending_stellar_override_amounts() {
+    val request =
+      NotifyRefundSentRequest.builder()
+        .transactionId(TX_ID)
+        .refund(
+          NotifyRefundSentRequest.Refund.builder()
+            .amount(AmountAssetRequest("1", STELLAR_USDC))
+            .amountFee(AmountAssetRequest("0", STELLAR_USDC))
+            .id("1")
+            .build()
+        )
+        .build()
+    val txn31 = JdbcSep31Transaction()
+    txn31.status = PENDING_STELLAR.toString()
+    txn31.amountInAsset = STELLAR_USDC
+    txn31.amountIn = "1"
+    txn31.amountOutAsset = FIAT_USD
+    txn31.amountOut = "1"
+    txn31.amountFeeAsset = STELLAR_USDC
+    txn31.amountFee = "0"
+
+    val payment = JdbcSep31RefundPayment()
+    payment.id = "1"
+    payment.amount = "0.9"
+    payment.fee = "0.1"
+    val refunds = JdbcSep31Refunds()
+    refunds.amountRefunded = "0.9"
+    refunds.amountFee = "0.1"
+    refunds.payments = listOf(payment)
+    txn31.refunds = refunds
+
+    val sep31TxnCapture = slot<JdbcSep31Transaction>()
+    val anchorEventCapture = slot<AnchorEvent>()
+
+    mockkStatic(Metrics::class)
+
+    every { txn24Store.findByTransactionId(TX_ID) } returns null
+    every { txn31Store.findByTransactionId(any()) } returns txn31
+    every { txn31Store.save(capture(sep31TxnCapture)) } returns null
+    every { eventSession.publish(capture(anchorEventCapture)) } just Runs
+    every { Metrics.counter("sep31.transaction", "status", "refunded") } returns
+      sepTransactionCounter
+
+    val startDate = Instant.now()
+    val response = handler.handle(request)
+    val endDate = Instant.now()
+
+    verify(exactly = 0) { txn24Store.save(any()) }
+    verify(exactly = 1) { sepTransactionCounter.increment() }
+
+    val expectedSep31Txn = JdbcSep31Transaction()
+    expectedSep31Txn.status = REFUNDED.toString()
+    expectedSep31Txn.updatedAt = sep31TxnCapture.captured.updatedAt
+    expectedSep31Txn.amountInAsset = STELLAR_USDC
+    expectedSep31Txn.amountIn = "1"
+    expectedSep31Txn.amountOutAsset = FIAT_USD
+    expectedSep31Txn.amountOut = "1"
+    expectedSep31Txn.amountFeeAsset = STELLAR_USDC
+    expectedSep31Txn.amountFee = "0"
+    expectedSep31Txn.completedAt = sep31TxnCapture.captured.completedAt
+
+    val expectedPayment = JdbcSep31RefundPayment()
+    expectedPayment.id = "1"
+    expectedPayment.amount = "1"
+    expectedPayment.fee = "0"
+    val expectedRefunds = JdbcSep31Refunds()
+    expectedRefunds.amountRefunded = "1"
+    expectedRefunds.amountFee = "0"
+    expectedRefunds.payments = listOf(expectedPayment)
+    expectedSep31Txn.refunds = expectedRefunds
+
+    JSONAssert.assertEquals(
+      gson.toJson(expectedSep31Txn),
+      gson.toJson(sep31TxnCapture.captured),
+      JSONCompareMode.STRICT
+    )
+
+    val expectedResponse = GetTransactionResponse()
+    expectedResponse.sep = SEP_31
+    expectedResponse.kind = RECEIVE
+    expectedResponse.status = REFUNDED
+    expectedResponse.amountExpected = Amount(null, STELLAR_USDC)
+    expectedResponse.amountIn = Amount("1", STELLAR_USDC)
+    expectedResponse.amountOut = Amount("1", FIAT_USD)
+    expectedResponse.amountFee = Amount("0", STELLAR_USDC)
+    expectedResponse.updatedAt = sep31TxnCapture.captured.updatedAt
+    expectedResponse.customers = Customers(StellarId(null, null), StellarId(null, null))
+
+    val refundPayment = RefundPayment()
+    refundPayment.amount = Amount("1", txn31.amountInAsset)
+    refundPayment.fee = Amount("0", txn31.amountInAsset)
+    refundPayment.id = "1"
+    refundPayment.idType = RefundPayment.IdType.STELLAR
+    val refunded = Amount("1", txn31.amountInAsset)
+    val refundedFee = Amount("0", txn31.amountInAsset)
+    expectedResponse.refunds = Refunds(refunded, refundedFee, arrayOf(refundPayment))
+    expectedResponse.completedAt = sep31TxnCapture.captured.completedAt
+
+    JSONAssert.assertEquals(
+      gson.toJson(expectedResponse),
+      gson.toJson(response),
+      JSONCompareMode.STRICT
+    )
+
+    val expectedEvent =
+      AnchorEvent.builder()
+        .id(anchorEventCapture.captured.id)
+        .sep(SEP_31.sep.toString())
+        .type(AnchorEvent.Type.TRANSACTION_STATUS_CHANGED)
+        .transaction(expectedResponse)
+        .build()
+
+    JSONAssert.assertEquals(
+      gson.toJson(expectedEvent),
+      gson.toJson(anchorEventCapture.captured),
+      JSONCompareMode.STRICT
+    )
+
+    assertTrue(sep31TxnCapture.captured.updatedAt >= startDate)
+    assertTrue(sep31TxnCapture.captured.updatedAt <= endDate)
+  }
+
+  @Test
+  fun test_handle_sep31_invalidRequest_missing_refunds() {
+    val request = NotifyRefundSentRequest.builder().transactionId(TX_ID).build()
+    val txn31 = JdbcSep31Transaction()
+    txn31.status = PENDING_RECEIVER.toString()
+
+    every { txn24Store.findByTransactionId(TX_ID) } returns null
+    every { txn31Store.findByTransactionId(any()) } returns txn31
+
+    val ex = assertThrows<InvalidParamsException> { handler.handle(request) }
+    assertEquals("refund is required", ex.message)
+  }
+
+  @Test
+  fun test_handle_sep31_multiple_refunds() {
+    val request =
+      NotifyRefundSentRequest.builder()
+        .transactionId(TX_ID)
+        .refund(
+          NotifyRefundSentRequest.Refund.builder()
+            .amount(AmountAssetRequest("1"))
+            .amountFee(AmountAssetRequest("0"))
+            .id("1")
+            .build()
+        )
+        .build()
+    val txn31 = JdbcSep31Transaction()
+    txn31.status = PENDING_RECEIVER.toString()
+
+    val payment = JdbcSep31RefundPayment()
+    payment.id = "1"
+    payment.amount = "0.1"
+    payment.fee = "0.1"
+    val refunds = JdbcSep31Refunds()
+    refunds.amountRefunded = "0.1"
+    refunds.amountFee = "0.1"
+    refunds.payments = listOf(payment)
+    txn31.refunds = refunds
+
+    every { txn24Store.findByTransactionId(TX_ID) } returns null
+    every { txn31Store.findByTransactionId(any()) } returns txn31
+
+    val ex = assertThrows<InvalidRequestException> { handler.handle(request) }
+    assertEquals(
+      "Multiple refunds aren't supported for kind[RECEIVE], protocol[31] and action[notify_refund_sent]",
+      ex.message
+    )
+  }
+
+  @Test
+  fun test_handle_sep31_custody_payment_not_completed() {
+    val request = NotifyRefundSentRequest.builder().transactionId(TX_ID).build()
+    val txn31 = JdbcSep31Transaction()
+    txn31.status = PENDING_STELLAR.toString()
+
+    every { txn24Store.findByTransactionId(TX_ID) } returns null
+    every { txn31Store.findByTransactionId(any()) } returns txn31
+
+    val ex = assertThrows<InvalidRequestException> { handler.handle(request) }
+    assertEquals("Custody payment hasn't been completed yet", ex.message)
+  }
+
+  @Test
+  fun test_handle_sep31_pending_external_invalid_id() {
+    val request =
+      NotifyRefundSentRequest.builder()
+        .transactionId(TX_ID)
+        .refund(
+          NotifyRefundSentRequest.Refund.builder()
+            .amount(AmountAssetRequest("1", STELLAR_USDC))
+            .amountFee(AmountAssetRequest("0", STELLAR_USDC))
+            .id("2")
+            .build()
+        )
+        .build()
+
+    val txn31 = JdbcSep31Transaction()
+    txn31.status = PENDING_STELLAR.toString()
+    txn31.amountInAsset = STELLAR_USDC
+    txn31.amountIn = "1"
+    txn31.amountOutAsset = FIAT_USD
+    txn31.amountOut = "1"
+    txn31.amountFeeAsset = STELLAR_USDC
+    txn31.amountFee = "0"
+
+    val payment = JdbcSep31RefundPayment()
+    payment.id = "1"
+    payment.amount = "0.9"
+    payment.fee = "0.1"
+    val refunds = JdbcSep31Refunds()
+    refunds.amountRefunded = "0.9"
+    refunds.amountFee = "0.1"
+    refunds.payments = listOf(payment)
+    txn31.refunds = refunds
+
+    every { txn24Store.findByTransactionId(TX_ID) } returns null
+    every { txn31Store.findByTransactionId(any()) } returns txn31
 
     val ex = assertThrows<InvalidParamsException> { handler.handle(request) }
     assertEquals("Invalid refund id", ex.message)

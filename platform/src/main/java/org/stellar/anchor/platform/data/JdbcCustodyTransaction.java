@@ -29,12 +29,12 @@ public class JdbcCustodyTransaction {
 
   @Id String id;
 
-  @SerializedName("sep_txn_id")
-  @Column(name = "sep_txn_id")
+  @SerializedName("sep_tx_id")
+  @Column(name = "sep_tx_id")
   String sepTxId;
 
-  @SerializedName("external_id")
-  @Column(name = "external_id")
+  @SerializedName("external_tx_id")
+  @Column(name = "external_tx_id")
   String externalTxId;
 
   @SerializedName("status")
@@ -45,9 +45,9 @@ public class JdbcCustodyTransaction {
   @Column(name = "amount")
   String amount;
 
-  @SerializedName("amount_asset")
-  @Column(name = "amount_asset")
-  String amountAsset;
+  @SerializedName("asset")
+  @Column(name = "asset")
+  String asset;
 
   @SerializedName("created_at")
   @Column(name = "created_at")
@@ -84,4 +84,38 @@ public class JdbcCustodyTransaction {
   @SerializedName("reconciliation_attempt_count")
   @Column(name = "reconciliation_attempt_count")
   int reconciliationAttemptCount;
+
+  @SerializedName("type")
+  @Column(name = "type")
+  String type;
+
+  @SerializedName("amount_fee")
+  @Column(name = "amount_fee")
+  String amountFee;
+
+  public enum PaymentType {
+    @SerializedName("payment")
+    PAYMENT("payment"),
+    @SerializedName("refund")
+    REFUND("refund");
+
+    private final String type;
+
+    PaymentType(String type) {
+      this.type = type;
+    }
+
+    public String getType() {
+      return type;
+    }
+
+    public static PaymentType from(String str) {
+      for (PaymentType type : values()) {
+        if (type.type.equals(str)) {
+          return type;
+        }
+      }
+      throw new IllegalArgumentException("No matching constant for [" + str + "]");
+    }
+  }
 }
