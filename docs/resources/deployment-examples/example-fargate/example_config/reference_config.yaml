@@ -7,7 +7,7 @@ server:
 #
 anchor.settings:
   version: 0.0.1
-  platformApiEndpoint: https://www.stellaranchordemo.com
+  platformApiEndpoint: https://janchor.alfredpay.io
 event:
   # The listener type. values: [kafka, sqs, amqp]
   # If the listener is kafka, the kafka listener is configured in kafka.listener section.
@@ -27,13 +27,22 @@ sqs.listener:
   secretKey: ${SQS_SECRET_KEY}
 
 #
+# Spring Data JDBC settings for PostgreSQL
+#
+spring.datasource.url: jdbc:postgresql://stellaranchordevstg.cnfqy9ufkb13.us-east-1.rds.amazonaws.com:5432/janchor-dev
+spring.datasource.username=dev_stellar
+spring.datasource.password=ZGV2X3N0ZWxsYXIK
+spring.datasource.initialization-mode=always
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.generate-ddl=true
+#
 # Spring Data JDBC settings for H2
 #
-spring.datasource.url: jdbc:h2:mem:test
-spring.jpa.properties.hibernate.dialect: org.hibernate.dialect.H2Dialect
+# spring.datasource.url: jdbc:h2:mem:test
+# spring.jpa.properties.hibernate.dialect: org.hibernate.dialect.H2Dialect
 # force gson as serializer/deserializer over jackson
-spring.mvc.converters.preferred-json-mapper: gson
-spring.flyway.enabled: false
+# spring.mvc.converters.preferred-json-mapper: gson
+# spring.flyway.enabled: false
 
 #
 # Spring Data JDBC settings for SQLite

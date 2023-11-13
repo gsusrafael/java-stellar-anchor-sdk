@@ -29,34 +29,34 @@ data "aws_ssm_parameter" "sep10_signing_seed" {
   depends_on = [aws_ssm_parameter.sep10_signing_seed]
 }
 
-resource "aws_ssm_parameter" "sqlite_username" {
-  name  = "/${var.environment}/anchorplatform/SQLITE_USERNAME"
+resource "aws_ssm_parameter" "postgresql_username" {
+  name  = "/${var.environment}/anchorplatform/POSTGRESQL_USERNAME"
   type  = "SecureString"
-  value = "${var.sqlite_username}"
+  value = "${var.postgresql_username}"
 
     tags = {
     environment = "${var.environment}"
   }
 }
 
-data "aws_ssm_parameter" "sqlite_username" {
-  name  = "/${var.environment}/anchorplatform/SQLITE_USERNAME" 
-  depends_on = [aws_ssm_parameter.sqlite_username]
+data "aws_ssm_parameter" "postgresql_username" {
+  name  = "/${var.environment}/anchorplatform/POSTGRESQL_USERNAME" 
+  depends_on = [aws_ssm_parameter.postgresql_username]
 }
 
-resource "aws_ssm_parameter" "sqlite_password" {
-  name  = "/${var.environment}/anchorplatform/SQLITE_PASSWORD"
+resource "aws_ssm_parameter" "postgresql_password" {
+  name  = "/${var.environment}/anchorplatform/POSTGRESQL_PASSWORD"
   type  = "SecureString"
-  value = "${var.sqlite_password}"
+  value = "${var.postgresql_password}"
 
     tags = {
     environment = "${var.environment}"
   }
 }
 
-data "aws_ssm_parameter" "sqlite_password" {
-  name  = "/${var.environment}/anchorplatform/SQLITE_PASSWORD" 
-  depends_on = [aws_ssm_parameter.sqlite_password]
+data "aws_ssm_parameter" "postgresql_password" {
+  name  = "/${var.environment}/anchorplatform/POSTGRESQL_PASSWORD" 
+  depends_on = [aws_ssm_parameter.postgresql_password]
 }
 
 

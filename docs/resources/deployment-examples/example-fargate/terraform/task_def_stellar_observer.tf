@@ -53,12 +53,12 @@ resource "aws_ecs_task_definition" "sep" {
         "valueFrom": data.aws_ssm_parameter.sqs_secret_key.arn
       },
       {
-        "name": "SQLITE_USERNAME",
-        "valueFrom": data.aws_ssm_parameter.sqlite_username.arn
+        "name": "POSTGRESQL_USERNAME",
+        "valueFrom": data.aws_ssm_parameter.postgresql_username.arn
       },
       {
-        "name": "SQLITE_PASSWORD",
-        "valueFrom": data.aws_ssm_parameter.sqlite_password.arn
+        "name": "POSTGRESQL_PASSWORD",
+        "valueFrom": data.aws_ssm_parameter.postgresql_password.arn
       },
       {
         "name": "SEP_10_SIGNING_SEED",

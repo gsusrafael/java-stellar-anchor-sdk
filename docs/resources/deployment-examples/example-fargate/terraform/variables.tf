@@ -1,3 +1,13 @@
+terraform {
+  cloud {
+    organization = "gsusrafael"
+
+    workspaces {
+      name = "java-stellar-anchor"
+    }
+  }
+}
+
 variable "environment" {
   description = "deployment environment"
   type = string
@@ -11,19 +21,19 @@ variable "hosted_zone_name" {
 
 variable "jwt_secret" {
   type  = string
-  default = "secret"
+  default = "YA4gPKwQGijjWWDgEUReacoQAWrrsU0G8QgGGKRKvX30g3Uu"
 }
 variable "sep10_signing_seed" {
     type  = string
 }
 
-variable "sqlite_username" {
+variable "postgresql_username" {
     type  = string
-    default = "admin"
+    default = "dev_stellar"
 }
-variable "sqlite_password" {
+variable "postgresql_password" {
     type  = string
-    default = "admin"
+    default = "ZGV2X3N0ZWxsYXIK"
 }
 
 variable  "sqs_access_key" {
